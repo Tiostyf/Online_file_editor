@@ -20,10 +20,27 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 // ========== MIDDLEWARE ==========
+// Configure allowed origins
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+];
+
+// Add production client URL if provided via environment variable
+if (process.env.CLIENT_URL) {
+  allowedOrigins.push(process.env.CLIENT_URL);
+}
+// Render automatically sets this environment variable to your service URL
+if (process.env.RENDER_EXTERNAL_URL) {
+  allowedOrigins.push(process.env.RENDER_EXTERNAL_URL);
+}
+
 app.use(cors({
   origin: function (origin, callback) {
-    const allowed = ['http://localhost:5173', 'http://localhost:5174'];
-    if (!origin || allowed.includes(origin)) {
+    // Allow requests with no origin (like mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
