@@ -45,6 +45,15 @@ const processedDir = path.join(__dirname, 'processed');
 app.use('/uploads', express.static(uploadDir));
 app.use('/processed', express.static(processedDir));
 
+// ========== SERVE FRONTEND STATIC FILES ==========
+const publicDir = path.join(__dirname, 'public');
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+  console.log('✅ Serving frontend from /public');
+} else {
+  console.warn('⚠️ public folder not found – frontend will not be served');
+}
+
 // ========== SEQUELIZE SETUP (SQLite) ==========
 const sequelize = new Sequelize({
   dialect: 'sqlite',
@@ -665,6 +674,18 @@ app.get('/api/download/:filename', auth, async (req, res) => {
   } catch (e) {
     console.error('Download error:', e);
     res.status(500).json({ success: false, message: 'Download failed' });
+  }
+});
+
+// ========== CATCH‑ALL ROUTE FOR FRONTEND (SPA) ==========
+// This must come AFTER all API routes
+app.get('*', (req, res) => {
+  const publicDir = path.join(__dirname, 'public');
+  const indexPath = path.join(publicDir, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).send('Frontend not built. Please run npm run build in frontend and copy to public.');
   }
 });
 
