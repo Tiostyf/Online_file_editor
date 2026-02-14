@@ -1,4 +1,3 @@
-// src/api.js
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5001';
 
 const TOKEN_KEY = 'auth_token';
@@ -21,14 +20,14 @@ const setToken = (token) => {
     localStorage.removeItem(TOKEN_KEY);
     return;
   }
-  
+
   // Basic JWT validation
   const tokenParts = token.split('.');
   if (tokenParts.length !== 3) {
     console.error('Invalid JWT format, not storing');
     return;
   }
-  
+
   localStorage.setItem(TOKEN_KEY, token);
 };
 
@@ -41,8 +40,7 @@ const authHeaders = () => {
   if (!token) {
     return {};
   }
-  
-  return { 
+  return {
     Authorization: `Bearer ${token}`
   };
 };
@@ -132,7 +130,7 @@ export const updateProfile = (updates) =>
 export const processFiles = async (files, tool, options = {}, onProgress = () => {}) => {
   // Validate input
   if (!files?.length) throw new Error('No files selected');
-  
+
   const validTools = ['compress', 'merge', 'convert', 'enhance', 'preview'];
   if (!validTools.includes(tool)) {
     throw new Error(`Invalid tool: ${tool}. Valid tools are: ${validTools.join(', ')}`);
@@ -145,10 +143,10 @@ export const processFiles = async (files, tool, options = {}, onProgress = () =>
   }
 
   const form = new FormData();
-  
+
   // Use 'files' as field name to match server
   files.forEach(f => form.append('files', f));
-  
+
   form.append('tool', tool);
 
   // Compression level
@@ -241,7 +239,7 @@ export const getHistory = (page = 1) =>
 export const downloadFile = (filename) => {
   const token = getToken();
   const url = `${API_BASE}/api/download/${filename}`;
-  
+
   if (token) {
     window.open(`${url}?token=${token}`, '_blank');
   } else {

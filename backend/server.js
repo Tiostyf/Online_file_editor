@@ -1,6 +1,4 @@
-// server.js
 import express from 'express';
-import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import cors from 'cors';
@@ -13,6 +11,7 @@ import fs from 'fs';
 import sharp from 'sharp';
 import { PDFDocument } from 'pdf-lib';
 import archiver from 'archiver';
+import { Sequelize, DataTypes, Op } from 'sequelize';
 
 dotenv.config();
 
@@ -20,16 +19,24 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
 
-// === Middleware ===
-app.use(cors({ 
-  origin: process.env.CLIENT_URL || 'http://localhost:5173', 
-  credentials: true 
+// ========== MIDDLEWARE ==========
+app.use(cors({
+  origin: function (origin, callback) {
+    const allowed = ['http://localhost:5173', 'http://localhost:5174'];
+    if (!origin || allowed.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
 }));
-app.use(compression());
+
 app.use(express.json({ limit: '150mb' }));
 app.use(express.urlencoded({ extended: true, limit: '150mb' }));
+app.use(compression());
 
-// === Static Folders ===
+// ========== STATIC FOLDERS ==========
 const uploadDir = path.join(__dirname, 'uploads');
 const processedDir = path.join(__dirname, 'processed');
 [uploadDir, processedDir].forEach(dir => {
@@ -38,60 +45,108 @@ const processedDir = path.join(__dirname, 'processed');
 app.use('/uploads', express.static(uploadDir));
 app.use('/processed', express.static(processedDir));
 
-// === MongoDB ===
-const connectDB = async () => {
-  try {
-    console.log('Connecting to MongoDB...');
-    const conn = await mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/filecompressor');
-    console.log('MongoDB Connected');
-    console.log(`Database: ${conn.connection.name}`);
-  } catch (e) {
-    console.error('MongoDB error:', e.message);
+// ========== SEQUELIZE SETUP (SQLite) ==========
+const sequelize = new Sequelize({
+  dialect: 'sqlite',
+  storage: process.env.DB_STORAGE || './database.sqlite',
+  logging: false,
+  define: {
+    timestamps: true,
+    underscored: true
   }
-};
-connectDB();
+});
 
-// === Schemas ===
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true, trim: true, minlength: 3, maxlength: 30 },
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-  password: { type: String, required: true, minlength: 6 },
-  profile: { 
-    fullName: String, 
-    company: String, 
-    phone: String, 
-    location: String, 
-    avatar: String 
+// ========== MODELS ==========
+const User = sequelize.define('User', {
+  username: {
+    type: DataTypes.STRING(30),
+    allowNull: false,
+    unique: true,
+    validate: { len: [3, 30] }
   },
-  preferences: { 
-    theme: { type: String, default: 'light' }, 
-    notifications: { type: Boolean, default: true } 
+  email: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true,
+    validate: { isEmail: true }
+  },
+  password: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    validate: { len: [6] }
+  },
+  profile: {
+    type: DataTypes.JSON,
+    defaultValue: {}
+  },
+  preferences: {
+    type: DataTypes.JSON,
+    defaultValue: { theme: 'light', notifications: true }
   },
   stats: {
-    totalFiles: { type: Number, default: 0 },
-    totalSize: { type: Number, default: 0 },
-    totalCompressed: { type: Number, default: 0 },
-    spaceSaved: { type: Number, default: 0 },
-    totalDownloads: { type: Number, default: 0 }
+    type: DataTypes.JSON,
+    defaultValue: {
+      totalFiles: 0,
+      totalSize: 0,
+      totalCompressed: 0,
+      spaceSaved: 0,
+      totalDownloads: 0
+    }
   }
-}, { timestamps: true });
+});
 
-const fileSchema = new mongoose.Schema({
-  filename: { type: String, required: true },
-  originalName: { type: String, required: true },
-  size: { type: Number, required: true },
-  compressedSize: { type: Number, required: true },
-  type: { type: String, required: true },
-  owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  downloadCount: { type: Number, default: 0 },
-  compressionRatio: Number,
-  toolUsed: String
-}, { timestamps: true });
+const File = sequelize.define('File', {
+  filename: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  originalName: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  size: {
+    type: DataTypes.BIGINT,
+    allowNull: false
+  },
+  compressedSize: {
+    type: DataTypes.BIGINT,
+    allowNull: false
+  },
+  type: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  downloadCount: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  compressionRatio: {
+    type: DataTypes.FLOAT
+  },
+  toolUsed: {
+    type: DataTypes.STRING
+  }
+});
 
-const User = mongoose.model('User', userSchema);
-const File = mongoose.model('File', fileSchema);
+// Associations
+User.hasMany(File, { foreignKey: 'ownerId', as: 'files' });
+File.belongsTo(User, { foreignKey: 'ownerId', as: 'owner' });
 
-// === Multer ===
+// ========== DATABASE SYNC ==========
+const initDB = async () => {
+  try {
+    await sequelize.authenticate();
+    console.log('✅ SQLite Connected');
+    await sequelize.sync({ alter: true });
+    console.log('   Database synced');
+  } catch (e) {
+    console.error('❌ Database error:', e.message);
+    process.exit(1);
+  }
+};
+initDB();
+
+// ========== MULTER ==========
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
@@ -105,16 +160,14 @@ const upload = multer({
   fileFilter: (req, file, cb) => cb(null, true)
 });
 
-// === Auth Middleware - FIXED JWT MALFORMED ERROR ===
+// ========== AUTH MIDDLEWARE ==========
 const auth = async (req, res, next) => {
   try {
     const authHeader = req.header('Authorization');
-    
     if (!authHeader) {
       return res.status(401).json({ success: false, message: 'No authorization header' });
     }
 
-    // Extract token safely
     let token;
     if (authHeader.startsWith('Bearer ')) {
       token = authHeader.slice(7).trim();
@@ -122,72 +175,62 @@ const auth = async (req, res, next) => {
       token = authHeader.trim();
     }
 
-    // Validate token exists and is not empty
     if (!token || token === 'null' || token === 'undefined' || token === '') {
       return res.status(401).json({ success: false, message: 'Token is empty' });
     }
 
-    // Basic JWT format check
     const tokenParts = token.split('.');
     if (tokenParts.length !== 3) {
       return res.status(401).json({ success: false, message: 'Invalid token format' });
     }
 
-    // Verify token with proper error handling
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret');
-    const user = await User.findById(decoded.userId).select('-password');
-    
+    const user = await User.findByPk(decoded.userId, {
+      attributes: { exclude: ['password'] }
+    });
+
     if (!user) {
       return res.status(401).json({ success: false, message: 'User not found' });
     }
 
     req.user = user;
     next();
-    
   } catch (e) {
     console.error('Auth error:', e.message);
-    
     if (e.name === 'JsonWebTokenError') {
-      if (e.message.includes('malformed')) {
-        return res.status(401).json({ 
-          success: false, 
-          message: 'Invalid token. Please login again.' 
-        });
-      }
       return res.status(401).json({ success: false, message: 'Invalid token' });
     }
-    
     if (e.name === 'TokenExpiredError') {
       return res.status(401).json({ success: false, message: 'Token expired' });
     }
-    
     res.status(401).json({ success: false, message: 'Authentication failed' });
   }
 };
 
-// === Helper ===
+// ========== HELPER ==========
 const updateStats = async (userId, orig, comp) => {
-  await User.findByIdAndUpdate(userId, {
-    $inc: {
-      'stats.totalFiles': 1,
-      'stats.totalSize': orig,
-      'stats.totalCompressed': comp,
-      'stats.spaceSaved': orig - comp
-    }
-  });
+  const user = await User.findByPk(userId);
+  if (!user) return;
+
+  const stats = user.stats || {};
+  stats.totalFiles = (stats.totalFiles || 0) + 1;
+  stats.totalSize = (stats.totalSize || 0) + orig;
+  stats.totalCompressed = (stats.totalCompressed || 0) + comp;
+  stats.spaceSaved = (stats.spaceSaved || 0) + (orig - comp);
+
+  await user.update({ stats });
 };
 
-// === Routes ===
-
+// ========== ROUTES ==========
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    success: true, 
-    message: 'Server running', 
-    db: mongoose.connection.readyState === 1 ? 'OK' : 'DOWN' 
+  res.json({
+    success: true,
+    message: 'Server running',
+    db: 'OK'
   });
 });
 
-// === REGISTER ===
+// ----- REGISTER -----
 app.post('/api/register', async (req, res) => {
   try {
     const { username, email, password, fullName = '', company = '' } = req.body;
@@ -198,26 +241,29 @@ app.post('/api/register', async (req, res) => {
     if (username.length < 3) return res.status(400).json({ success: false, message: 'Username must be at least 3 characters' });
     if (password.length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
 
-    const exists = await User.findOne({ $or: [{ email }, { username }] });
-    if (exists) {
-      return res.status(400).json({ 
-        success: false, 
-        message: exists.email === email ? 'Email already in use' : 'Username already taken' 
+    const existing = await User.findOne({
+      where: {
+        [Op.or]: [{ email }, { username }]
+      }
+    });
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        message: existing.email === email ? 'Email already in use' : 'Username already taken'
       });
     }
 
     const hashed = await bcrypt.hash(password, 10);
-    const user = new User({ 
-      username, 
-      email, 
-      password: hashed, 
-      profile: { fullName, company } 
+    const user = await User.create({
+      username,
+      email,
+      password: hashed,
+      profile: { fullName, company }
     });
-    await user.save();
 
     const token = jwt.sign(
-      { userId: user._id }, 
-      process.env.JWT_SECRET || 'fallback-secret', 
+      { userId: user.id },
+      process.env.JWT_SECRET || 'fallback-secret',
       { expiresIn: '7d' }
     );
 
@@ -225,7 +271,7 @@ app.post('/api/register', async (req, res) => {
       success: true,
       token,
       user: {
-        id: user._id,
+        id: user.id,
         username: user.username,
         email: user.email,
         profile: user.profile,
@@ -235,15 +281,11 @@ app.post('/api/register', async (req, res) => {
     });
   } catch (e) {
     console.error('Register error:', e);
-    if (e.name === 'ValidationError') {
-      const msg = Object.values(e.errors)[0]?.message || 'Validation error';
-      return res.status(400).json({ success: false, message: msg });
-    }
     res.status(500).json({ success: false, message: 'Server error during registration' });
   }
 });
 
-// === LOGIN ===
+// ----- LOGIN -----
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -251,7 +293,7 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Email and password are required' });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const user = await User.findOne({ where: { email: email.toLowerCase().trim() } });
     if (!user) {
       return res.status(400).json({ success: false, message: 'Invalid email or password' });
     }
@@ -262,8 +304,8 @@ app.post('/api/login', async (req, res) => {
     }
 
     const token = jwt.sign(
-      { userId: user._id }, 
-      process.env.JWT_SECRET || 'fallback-secret', 
+      { userId: user.id },
+      process.env.JWT_SECRET || 'fallback-secret',
       { expiresIn: '7d' }
     );
 
@@ -271,7 +313,7 @@ app.post('/api/login', async (req, res) => {
       success: true,
       token,
       user: {
-        id: user._id,
+        id: user.id,
         username: user.username,
         email: user.email,
         profile: user.profile,
@@ -285,10 +327,10 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// === PROFILE ===
+// ----- PROFILE -----
 app.get('/api/profile', auth, async (req, res) => {
   try {
-    const files = await File.find({ owner: req.user._id });
+    const files = await File.findAll({ where: { ownerId: req.user.id } });
     const stats = {
       totalFiles: files.length,
       totalSize: files.reduce((s, f) => s + f.size, 0),
@@ -300,7 +342,7 @@ app.get('/api/profile', auth, async (req, res) => {
     res.json({
       success: true,
       user: {
-        id: req.user._id,
+        id: req.user.id,
         username: req.user.username,
         email: req.user.email,
         profile: req.user.profile,
@@ -314,34 +356,36 @@ app.get('/api/profile', auth, async (req, res) => {
   }
 });
 
-// === UPDATE PROFILE ===
+// ----- UPDATE PROFILE -----
 app.put('/api/profile', auth, async (req, res) => {
   try {
     const updates = req.body;
     const allowed = ['fullName', 'company', 'phone', 'location', 'theme', 'notifications'];
-    const toUpdate = {};
+    const profileUpdate = {};
+    const prefsUpdate = {};
 
     allowed.forEach(f => {
       if (updates[f] !== undefined) {
         if (['theme', 'notifications'].includes(f)) {
-          toUpdate[`preferences.${f}`] = updates[f];
+          prefsUpdate[f] = updates[f];
         } else {
-          toUpdate[`profile.${f}`] = updates[f];
+          profileUpdate[f] = updates[f];
         }
       }
     });
 
-    const user = await User.findByIdAndUpdate(
-      req.user._id, 
-      toUpdate, 
-      { new: true, runValidators: true }
-    ).select('-password');
-    
+    const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    const files = await File.find({ owner: user._id });
+    // Merge JSON fields
+    const newProfile = { ...user.profile, ...profileUpdate };
+    const newPrefs = { ...user.preferences, ...prefsUpdate };
+
+    await user.update({ profile: newProfile, preferences: newPrefs });
+
+    const files = await File.findAll({ where: { ownerId: user.id } });
     const stats = {
       totalFiles: files.length,
       totalSize: files.reduce((s, f) => s + f.size, 0),
@@ -353,7 +397,7 @@ app.put('/api/profile', auth, async (req, res) => {
     res.json({
       success: true,
       user: {
-        id: user._id,
+        id: user.id,
         username: user.username,
         email: user.email,
         profile: user.profile,
@@ -367,7 +411,7 @@ app.put('/api/profile', auth, async (req, res) => {
   }
 });
 
-// === PROCESS FILES ===
+// ----- PROCESS FILES -----
 app.post('/api/process', auth, upload.array('files'), async (req, res) => {
   try {
     const files = req.files;
@@ -376,16 +420,16 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
     }
 
     const { tool, compressLevel, format, order } = req.body;
-    
+
     const validTools = ['compress', 'merge', 'convert', 'enhance', 'preview'];
     if (!validTools.includes(tool)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: `Invalid tool: ${tool}. Valid tools are: ${validTools.join(', ')}` 
+      return res.status(400).json({
+        success: false,
+        message: `Invalid tool: ${tool}. Valid tools are: ${validTools.join(', ')}`
       });
     }
 
-    // Handle preview tool
+    // Preview tool
     if (tool === 'preview') {
       const fileInfo = files.map(f => ({
         name: f.originalname,
@@ -406,9 +450,9 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
     }
 
     if (['convert', 'enhance'].includes(tool) && files.length !== 1) {
-      return res.status(400).json({ 
-        success: false, 
-        message: `${tool.charAt(0).toUpperCase() + tool.slice(1)} requires exactly 1 file` 
+      return res.status(400).json({
+        success: false,
+        message: `${tool.charAt(0).toUpperCase() + tool.slice(1)} requires exactly 1 file`
       });
     }
 
@@ -425,7 +469,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       outPath = path.join(processedDir, `${Date.now()}-compressed.zip`);
       const output = fs.createWriteStream(outPath);
       const archive = archiver('zip', { zlib: { level } });
-      
+
       await new Promise((resolve, reject) => {
         archive.pipe(output);
         files.forEach(f => archive.file(f.path, { name: f.originalname }));
@@ -435,27 +479,27 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       });
 
       compSize = fs.statSync(outPath).size;
-      fileName = files.length === 1 
-        ? `${path.parse(files[0].originalname).name}_compressed.zip` 
+      fileName = files.length === 1
+        ? `${path.parse(files[0].originalname).name}_compressed.zip`
         : `batch_${Date.now()}.zip`;
       mime = 'application/zip';
 
     } else if (tool === 'merge') {
       const nonPdfFiles = files.filter(f => f.mimetype !== 'application/pdf');
       if (nonPdfFiles.length > 0) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'All files must be PDFs for merging' 
+        return res.status(400).json({
+          success: false,
+          message: 'All files must be PDFs for merging'
         });
       }
 
       const pdfDoc = await PDFDocument.create();
       const orderArr = order ? JSON.parse(order) : files.map(f => f.originalname);
-      
+
       for (const name of orderArr) {
         const file = files.find(f => f.originalname === name);
         if (!file) continue;
-        
+
         const srcBytes = fs.readFileSync(file.path);
         const src = await PDFDocument.load(srcBytes);
         const pages = await pdfDoc.copyPages(src, src.getPageIndices());
@@ -472,19 +516,19 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
     } else if (tool === 'convert') {
       const file = files[0];
       const ext = format.toLowerCase();
-      
+
       const validImageFormats = ['jpg', 'jpeg', 'png', 'webp'];
       const validAudioFormats = ['mp3', 'wav'];
-      
+
       if (![...validImageFormats, ...validAudioFormats].includes(ext)) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Unsupported format. Use: jpg, png, webp, mp3, wav' 
+        return res.status(400).json({
+          success: false,
+          message: 'Unsupported format. Use: jpg, png, webp, mp3, wav'
         });
       }
 
       outPath = path.join(processedDir, `${Date.now()}-converted.${ext}`);
-      
+
       if (validImageFormats.includes(ext)) {
         await sharp(file.path)
           .toFormat(ext === 'jpg' ? 'jpeg' : ext)
@@ -494,17 +538,17 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
         fs.copyFileSync(file.path, outPath);
         mime = `audio/${ext}`;
       }
-      
+
       compSize = fs.statSync(outPath).size;
       fileName = `${path.parse(file.originalname).name}_converted.${ext}`;
 
     } else if (tool === 'enhance') {
       const file = files[0];
-      
+
       if (!file.mimetype.startsWith('image/')) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Only images can be enhanced' 
+        return res.status(400).json({
+          success: false,
+          message: 'Only images can be enhanced'
         });
       }
 
@@ -515,25 +559,25 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
         .modulate({ brightness: 1.1, saturation: 1.2 })
         .webp({ quality: 90 })
         .toFile(outPath);
-      
+
       compSize = fs.statSync(outPath).size;
       fileName = `${path.parse(file.originalname).name}_enhanced.webp`;
       mime = 'image/webp';
     }
 
     // Save file record
-    const processed = new File({
+    const processed = await File.create({
       filename: path.basename(outPath),
       originalName: fileName,
       size: origSize,
       compressedSize: compSize,
       type: mime,
-      owner: req.user._id,
+      ownerId: req.user.id,
       compressionRatio: origSize > 0 ? Number(((origSize - compSize) / origSize * 100).toFixed(2)) : 0,
       toolUsed: tool
     });
-    await processed.save();
-    await updateStats(req.user._id, origSize, compSize);
+
+    await updateStats(req.user.id, origSize, compSize);
 
     res.json({
       success: true,
@@ -547,9 +591,9 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
 
   } catch (e) {
     console.error('Process error:', e);
-    res.status(500).json({ 
-      success: false, 
-      message: e.message || 'File processing failed' 
+    res.status(500).json({
+      success: false,
+      message: e.message || 'File processing failed'
     });
   } finally {
     // Cleanup uploaded files
@@ -565,26 +609,26 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
   }
 });
 
-// === HISTORY ===
+// ----- HISTORY -----
 app.get('/api/history', auth, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = 10;
-    const skip = (page - 1) * limit;
-    
-    const files = await File.find({ owner: req.user._id })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-      
-    const total = await File.countDocuments({ owner: req.user._id });
-    
-    res.json({ 
-      success: true, 
-      files, 
-      total, 
-      page, 
-      pages: Math.ceil(total / limit) 
+    const offset = (page - 1) * limit;
+
+    const { count, rows: files } = await File.findAndCountAll({
+      where: { ownerId: req.user.id },
+      order: [['createdAt', 'DESC']],
+      limit,
+      offset
+    });
+
+    res.json({
+      success: true,
+      files,
+      total: count,
+      page,
+      pages: Math.ceil(count / limit)
     });
   } catch (e) {
     console.error('History error:', e);
@@ -592,24 +636,30 @@ app.get('/api/history', auth, async (req, res) => {
   }
 });
 
-// === DOWNLOAD FILE ===
+// ----- DOWNLOAD FILE -----
 app.get('/api/download/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
     const filePath = path.join(processedDir, filename);
-    
+
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ success: false, message: 'File not found' });
     }
 
-    await File.findOneAndUpdate(
-      { filename },
-      { $inc: { downloadCount: 1 } }
-    );
+    // Increment file download count
+    const file = await File.findOne({ where: { filename } });
+    if (file) {
+      file.downloadCount += 1;
+      await file.save();
+    }
 
-    await User.findByIdAndUpdate(req.user._id, {
-      $inc: { 'stats.totalDownloads': 1 }
-    });
+    // Increment user totalDownloads in stats JSON
+    const user = await User.findByPk(req.user.id);
+    if (user) {
+      const stats = { ...user.stats };
+      stats.totalDownloads = (stats.totalDownloads || 0) + 1;
+      await user.update({ stats });
+    }
 
     res.download(filePath);
   } catch (e) {
@@ -618,11 +668,10 @@ app.get('/api/download/:filename', auth, async (req, res) => {
   }
 });
 
-// === Start Server ===
+// ========== START SERVER ==========
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
-  console.log('\nFileMaster Pro Backend STARTED');
-  console.log(`http://localhost:${PORT}`);
-  console.log('Health check: http://localhost:' + PORT + '/api/health');
+  console.log('\n🚀 FileMaster Pro Backend STARTED (SQLite)');
+  console.log(`   http://localhost:${PORT}`);
+  console.log(`   Health check: http://localhost:${PORT}/api/health`);
 });
-//git remote add origin https://github.com/Tiostyf/online-file-editor2.git
