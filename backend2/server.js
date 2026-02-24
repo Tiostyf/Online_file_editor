@@ -12,6 +12,7 @@ import sharp from 'sharp';
 import { PDFDocument } from 'pdf-lib';
 import archiver from 'archiver';
 import mongoose from 'mongoose';
+import dns from 'dns';
 
 dotenv.config();
 
@@ -64,7 +65,12 @@ if (!mongoUri) {
   console.error('❌ MONGODB_URI is not defined in .env');
   process.exit(1);
 }
-mongoose.connect(mongoUri)
+
+dns.setServers(['8.8.8.8', '8.8.4.4']);
+
+mongoose.connect(mongoUri, {
+  family: 4, // Force IPv4 to resolve some DNS issues
+})
   .then(() => console.log('✅ MongoDB Connected'))
   .catch(err => {
     console.error('❌ MongoDB error:', err.message);
