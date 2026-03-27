@@ -73,7 +73,7 @@ function App() {
       <nav className="navbar">
         <div className="nav-brand">
           <i className="fas fa-file-alt"></i>
-          <span>Rio-Indus</span>
+          <span>Online-File-Editor</span>
         </div>
         <div className="nav-tabs">
           <button 
@@ -119,7 +119,7 @@ function App() {
       </main>
 
       <footer className="footer">
-        <p>&copy; 2024 Rio-Industry. The ultimate file management solution you'll love! 💖</p>
+        <p>&copy; 2024 Online-File-Editor. The Online-File-Editor solution you'll love! 💖</p>
       </footer>
     </div>
   )
