@@ -20,11 +20,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
 
-// ========== MIDDLEWARE ==========
+// ========== CORS CONFIGURATION ==========
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:3000',
+  'https://online-file-editor-frontend.onrender.com',
   'https://online-file-editor-backend.onrender.com'
 ];
 
@@ -36,12 +37,13 @@ if (process.env.RENDER_EXTERNAL_URL) {
   allowedOrigins.push(`https://${process.env.RENDER_EXTERNAL_URL}`);
 }
 
+// CORS middleware
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
-    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development') {
+    if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
       console.warn(`CORS blocked request from: ${origin}`);
@@ -52,6 +54,15 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Handle preflight requests explicitly
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.sendStatus(200);
+});
 
 app.use(express.json({ limit: '150mb' }));
 app.use(express.urlencoded({ extended: true, limit: '150mb' }));
@@ -485,8 +496,8 @@ app.put('/api/profile', auth, async (req, res) => {
 app.get('/api/uploads/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
-    const upload = await Upload.findOne({ filename, ownerId: req.user._id });
-    if (!upload) {
+    const uploadRecord = await Upload.findOne({ filename, ownerId: req.user._id });
+    if (!uploadRecord) {
       return res.status(404).json({ success: false, message: 'File not found or expired' });
     }
 
@@ -495,8 +506,8 @@ app.get('/api/uploads/:filename', auth, async (req, res) => {
       return res.status(404).json({ success: false, message: 'File missing from disk' });
     }
 
-    res.setHeader('Content-Type', upload.mimeType);
-    res.setHeader('Content-Disposition', `inline; filename="${upload.originalName}"`);
+    res.setHeader('Content-Type', uploadRecord.mimeType);
+    res.setHeader('Content-Disposition', `inline; filename="${uploadRecord.originalName}"`);
     res.sendFile(filePath);
   } catch (err) {
     console.error('Error serving upload:', err);
@@ -549,7 +560,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
     if (tool === 'preview') {
       const fileInfo = [];
       for (const f of files) {
-        const upload = await Upload.create({
+        const uploadRecord = await Upload.create({
           filename: f.filename,
           originalName: f.originalname,
           size: f.size,
@@ -558,12 +569,12 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
         });
 
         fileInfo.push({
-          id: upload._id,
-          name: upload.originalName,
-          size: upload.size,
-          type: upload.mimeType,
-          url: `/api/uploads/${upload.filename}`,
-          expiresAt: upload.expiresAt
+          id: uploadRecord._id,
+          name: uploadRecord.originalName,
+          size: uploadRecord.size,
+          type: uploadRecord.mimeType,
+          url: `/api/uploads/${uploadRecord.filename}`,
+          expiresAt: uploadRecord.expiresAt
         });
       }
 
@@ -842,13 +853,13 @@ setInterval(async () => {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
     const expiredUploads = await Upload.find({ createdAt: { $lt: oneHourAgo } });
     
-    for (const upload of expiredUploads) {
-      const filePath = path.join(uploadDir, upload.filename);
+    for (const uploadRecord of expiredUploads) {
+      const filePath = path.join(uploadDir, uploadRecord.filename);
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
-        console.log(`🧹 Deleted expired upload file: ${upload.filename}`);
+        console.log(`🧹 Deleted expired upload file: ${uploadRecord.filename}`);
       }
-      await upload.deleteOne();
+      await uploadRecord.deleteOne();
     }
 
     const files = await fs.promises.readdir(uploadDir);
@@ -856,8 +867,8 @@ setInterval(async () => {
       const filePath = path.join(uploadDir, file);
       const stat = await fs.promises.stat(filePath);
       if (stat.isFile() && (Date.now() - stat.mtimeMs) > 60 * 60 * 1000) {
-        const upload = await Upload.findOne({ filename: file });
-        if (!upload) {
+        const uploadRecord = await Upload.findOne({ filename: file });
+        if (!uploadRecord) {
           await fs.promises.unlink(filePath);
           console.log(`🧹 Deleted orphaned upload file: ${file}`);
         }
