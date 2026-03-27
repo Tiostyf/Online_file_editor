@@ -4,6 +4,8 @@ import jwt from 'jsonwebtoken';
 import cors from 'cors';
 import multer from 'multer';
 import compression from 'compression';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -20,7 +22,26 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
 
-// ========== CORS CONFIGURATION (FIXED) ==========
+// ========== PRODUCTION SECURITY MIDDLEWARE ==========
+// Helmet for security headers
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: false // Disable if you need inline scripts
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: { success: false, message: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Apply rate limiting to API routes
+app.use('/api/', limiter);
+
+// ========== CORS CONFIGURATION ==========
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
@@ -29,6 +50,7 @@ const allowedOrigins = [
   'https://online-file-editor-backend.onrender.com'
 ];
 
+// Add production frontend URL if provided
 if (process.env.CLIENT_URL) {
   allowedOrigins.push(process.env.CLIENT_URL);
 }
@@ -36,13 +58,13 @@ if (process.env.RENDER_EXTERNAL_URL) {
   allowedOrigins.push(`https://${process.env.RENDER_EXTERNAL_URL}`);
 }
 
-// CORS middleware with OPTIONS handling
+// CORS middleware
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
-    if (allowedOrigins.includes(origin)) {
+    if (allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
       callback(null, true);
     } else {
       console.warn(`CORS blocked request from: ${origin}`);
@@ -51,10 +73,11 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  exposedHeaders: ['Content-Disposition']
 }));
 
-// Handle preflight requests explicitly
+// Handle preflight requests
 app.options('*', (req, res) => {
   res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -63,42 +86,84 @@ app.options('*', (req, res) => {
   res.sendStatus(200);
 });
 
+// Body parsers with increased limits
 app.use(express.json({ limit: '150mb' }));
 app.use(express.urlencoded({ extended: true, limit: '150mb' }));
 app.use(compression());
 
+// Request logging (disable in production if not needed)
+if (process.env.NODE_ENV !== 'production') {
+  app.use((req, res, next) => {
+    console.log(`📥 ${req.method} ${req.url}`);
+    next();
+  });
+}
+
 // ========== STATIC FOLDERS ==========
 const uploadDir = path.join(__dirname, 'uploads');
 const processedDir = path.join(__dirname, 'processed');
+
 [uploadDir, processedDir].forEach(dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+    console.log(`📁 Created directory: ${dir}`);
+  }
 });
 
 // ========== MONGODB CONNECTION ==========
 const mongoUri = process.env.MONGODB_URI;
 if (!mongoUri) {
-  console.error('❌ MONGODB_URI is not defined in .env');
+  console.error('❌ MONGODB_URI is not defined in environment variables');
   process.exit(1);
 }
 
 dns.setServers(['8.8.8.8', '8.8.4.4']);
 
-mongoose.connect(mongoUri, {
+// MongoDB connection options for production
+const mongoOptions = {
   family: 4,
-})
-  .then(() => console.log('✅ MongoDB Connected'))
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
+  maxPoolSize: 10,
+  minPoolSize: 2,
+  retryWrites: true,
+  retryReads: true
+};
+
+mongoose.connect(mongoUri, mongoOptions)
+  .then(() => {
+    console.log('✅ MongoDB Connected Successfully');
+    console.log(`📊 Database: ${mongoose.connection.name}`);
+    console.log(`🔌 Connection Pool Size: ${mongoOptions.maxPoolSize}`);
+  })
   .catch(err => {
     console.error('❌ MongoDB error:', err.message);
     process.exit(1);
   });
 
+// MongoDB connection events
+mongoose.connection.on('error', err => {
+  console.error('MongoDB connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('⚠️ MongoDB disconnected. Attempting to reconnect...');
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  await mongoose.connection.close();
+  console.log('MongoDB connection closed through app termination');
+  process.exit(0);
+});
+
 // ========== MONGOOSE MODELS ==========
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, minlength: 3 },
-  email:    { type: String, required: true, unique: true, lowercase: true },
+  email: { type: String, required: true, unique: true, lowercase: true },
   password: { type: String, required: true },
-  role:     { type: String, enum: ['user', 'admin'], default: 'user' },
-  profile:  { type: Object, default: {} },
+  role: { type: String, enum: ['user', 'admin'], default: 'user' },
+  profile: { type: Object, default: {} },
   preferences: {
     type: Object,
     default: { theme: 'light', notifications: true }
@@ -116,24 +181,24 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const fileSchema = new mongoose.Schema({
-  filename:       { type: String, required: true },
-  originalName:   { type: String, required: true },
-  size:           { type: Number, required: true },
+  filename: { type: String, required: true, index: true },
+  originalName: { type: String, required: true },
+  size: { type: Number, required: true },
   compressedSize: { type: Number, required: true },
-  type:           { type: String, required: true },
-  downloadCount:  { type: Number, default: 0 },
+  type: { type: String, required: true },
+  downloadCount: { type: Number, default: 0 },
   compressionRatio: Number,
-  toolUsed:       String,
-  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
+  toolUsed: String,
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 }, { timestamps: true });
 
 const uploadSchema = new mongoose.Schema({
-  filename:       { type: String, required: true },
-  originalName:   { type: String, required: true },
-  size:           { type: Number, required: true },
-  mimeType:       { type: String, required: true },
-  ownerId:        { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  expiresAt:      { type: Date, default: () => Date.now() + 60 * 60 * 1000 }
+  filename: { type: String, required: true, index: true },
+  originalName: { type: String, required: true },
+  size: { type: Number, required: true },
+  mimeType: { type: String, required: true },
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  expiresAt: { type: Date, default: () => Date.now() + 60 * 60 * 1000, index: true }
 }, { timestamps: true });
 
 uploadSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
@@ -150,6 +215,7 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${safe}`);
   }
 });
+
 const upload = multer({
   storage,
   limits: { fileSize: 150 * 1024 * 1024 },
@@ -173,11 +239,6 @@ const auth = async (req, res, next) => {
 
     if (!token || token === 'null' || token === 'undefined' || token === '') {
       return res.status(401).json({ success: false, message: 'Token is empty' });
-    }
-
-    const tokenParts = token.split('.');
-    if (tokenParts.length !== 3) {
-      return res.status(401).json({ success: false, message: 'Invalid token format' });
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -225,20 +286,35 @@ const updateStats = async (userId, orig, comp) => {
 
 // ========== API ROUTES ==========
 
-// Root route - API info (important: this replaces the marketing page)
+// Root route - API info
 app.get('/', (req, res) => {
   res.json({
     name: 'Online File Editor API',
     version: '1.0.0',
-    status: 'running',
+    status: 'operational',
+    environment: process.env.NODE_ENV,
+    timestamp: new Date().toISOString(),
     endpoints: {
-      health: '/api/health',
-      login: 'POST /api/login',
-      register: 'POST /api/register'
+      health: 'GET /api/health',
+      auth: {
+        register: 'POST /api/register',
+        login: 'POST /api/login',
+        profile: 'GET /api/profile'
+      },
+      files: {
+        process: 'POST /api/process',
+        history: 'GET /api/history',
+        download: 'GET /api/download/:filename'
+      },
+      admin: {
+        users: 'GET /api/admin/users',
+        processes: 'GET /api/admin/file-processes'
+      }
     }
   });
 });
 
+// Health check
 app.get('/api/health', (req, res) => {
   const dbState = mongoose.connection.readyState;
   const dbStatus = {
@@ -247,16 +323,19 @@ app.get('/api/health', (req, res) => {
     2: 'connecting',
     3: 'disconnecting'
   }[dbState] || 'unknown';
-  
+
   res.json({
     success: true,
     message: 'Server running',
     db: dbStatus,
-    timestamp: new Date().toISOString()
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    memory: process.memoryUsage(),
+    environment: process.env.NODE_ENV
   });
 });
 
-// ----- REGISTER -----
+// Register
 app.post('/api/register', async (req, res) => {
   try {
     const { username, email, password, fullName = '', company = '' } = req.body;
@@ -264,12 +343,17 @@ app.post('/api/register', async (req, res) => {
     if (!username || !email || !password) {
       return res.status(400).json({ success: false, message: 'Username, email, and password are required' });
     }
-    if (username.length < 3) return res.status(400).json({ success: false, message: 'Username must be at least 3 characters' });
-    if (password.length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    if (username.length < 3) {
+      return res.status(400).json({ success: false, message: 'Username must be at least 3 characters' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    }
 
     const existing = await User.findOne({
       $or: [{ email: email.toLowerCase() }, { username }]
     });
+
     if (existing) {
       return res.status(400).json({
         success: false,
@@ -311,7 +395,7 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// ----- LOGIN -----
+// Login
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -354,7 +438,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// ----- PROFILE -----
+// Profile
 app.get('/api/profile', auth, async (req, res) => {
   try {
     const files = await File.find({ ownerId: req.user._id });
@@ -384,7 +468,7 @@ app.get('/api/profile', auth, async (req, res) => {
   }
 });
 
-// ----- UPDATE PROFILE -----
+// Update Profile
 app.put('/api/profile', auth, async (req, res) => {
   try {
     const updates = req.body;
@@ -438,8 +522,7 @@ app.put('/api/profile', auth, async (req, res) => {
   }
 });
 
-// ========== AUTHENTICATED FILE SERVING ==========
-
+// Serve temporary upload files
 app.get('/api/uploads/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
@@ -454,7 +537,7 @@ app.get('/api/uploads/:filename', auth, async (req, res) => {
     }
 
     res.setHeader('Content-Type', uploadRecord.mimeType);
-    res.setHeader('Content-Disposition', `inline; filename="${uploadRecord.originalName}"`);
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(uploadRecord.originalName)}"`);
     res.sendFile(filePath);
   } catch (err) {
     console.error('Error serving upload:', err);
@@ -462,6 +545,7 @@ app.get('/api/uploads/:filename', auth, async (req, res) => {
   }
 });
 
+// Serve processed files
 app.get('/api/processed/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
@@ -476,7 +560,7 @@ app.get('/api/processed/:filename', auth, async (req, res) => {
     }
 
     res.setHeader('Content-Type', file.type);
-    res.setHeader('Content-Disposition', `inline; filename="${file.originalName}"`);
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.originalName)}"`);
     res.sendFile(filePath);
   } catch (err) {
     console.error('Error serving processed file:', err);
@@ -484,7 +568,7 @@ app.get('/api/processed/:filename', auth, async (req, res) => {
   }
 });
 
-// ----- PROCESS FILES -----
+// Process Files
 app.post('/api/process', auth, upload.array('files'), async (req, res) => {
   try {
     const files = req.files;
@@ -502,6 +586,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       });
     }
 
+    // Preview branch
     if (tool === 'preview') {
       const fileInfo = [];
       for (const f of files) {
@@ -530,6 +615,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       });
     }
 
+    // Processing tools
     if (tool === 'merge' && files.length < 2) {
       return res.status(400).json({ success: false, message: 'Merge requires at least 2 files' });
     }
@@ -670,7 +756,8 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       size: compSize,
       originalSize: origSize,
       savings: origSize - compSize,
-      tool: tool
+      tool: tool,
+      compressionRatio: processed.compressionRatio
     });
 
   } catch (e) {
@@ -683,7 +770,9 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
     if (req.files) {
       req.files.forEach(f => {
         try {
-          fs.unlinkSync(f.path);
+          if (fs.existsSync(f.path)) {
+            fs.unlinkSync(f.path);
+          }
         } catch (cleanupError) {
           console.warn('Cleanup error:', cleanupError.message);
         }
@@ -692,11 +781,11 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
   }
 });
 
-// ----- HISTORY -----
+// History
 app.get('/api/history', auth, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = 10;
+    const limit = Math.min(50, parseInt(req.query.limit) || 10);
     const skip = (page - 1) * limit;
 
     const total = await File.countDocuments({ ownerId: req.user._id });
@@ -710,7 +799,8 @@ app.get('/api/history', auth, async (req, res) => {
       files,
       total,
       page,
-      pages: Math.ceil(total / limit)
+      pages: Math.ceil(total / limit),
+      limit
     });
   } catch (e) {
     console.error('History error:', e);
@@ -718,7 +808,7 @@ app.get('/api/history', auth, async (req, res) => {
   }
 });
 
-// ----- DOWNLOAD FILE -----
+// Download File
 app.get('/api/download/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
@@ -742,15 +832,14 @@ app.get('/api/download/:filename', auth, async (req, res) => {
       await user.save();
     }
 
-    res.download(filePath);
+    res.download(filePath, file?.originalName || filename);
   } catch (e) {
     console.error('Download error:', e);
     res.status(500).json({ success: false, message: 'Download failed' });
   }
 });
 
-// ========== ADMIN ROUTES ==========
-
+// Admin Routes
 app.get('/api/admin/users', auth, adminOnly, async (req, res) => {
   try {
     const users = await User.find().select('-password').sort({ createdAt: -1 });
@@ -775,9 +864,11 @@ app.get('/api/admin/file-processes', auth, adminOnly, async (req, res) => {
       fileType: proc.type,
       originalSize: (proc.size / (1024 * 1024)).toFixed(2),
       compressedSize: (proc.compressedSize / (1024 * 1024)).toFixed(2),
+      compressionRatio: proc.compressionRatio,
       processDate: proc.createdAt,
       status: 'Completed',
-      tool: proc.toolUsed
+      tool: proc.toolUsed,
+      downloadCount: proc.downloadCount
     }));
 
     res.json({ success: true, data: formatted });
@@ -788,7 +879,8 @@ app.get('/api/admin/file-processes', auth, adminOnly, async (req, res) => {
 });
 
 // ========== BACKGROUND CLEANUP ==========
-const CLEANUP_INTERVAL = 60 * 60 * 1000;
+const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
+
 setInterval(async () => {
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
@@ -820,11 +912,47 @@ setInterval(async () => {
   }
 }, CLEANUP_INTERVAL);
 
+// ========== 404 HANDLER ==========
+app.use((req, res) => {
+  res.status(404).json({ 
+    success: false, 
+    message: `Route not found: ${req.method} ${req.url}` 
+  });
+});
+
+// ========== ERROR HANDLING MIDDLEWARE ==========
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({
+    success: false,
+    message: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message
+  });
+});
+
 // ========== START SERVER ==========
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => {
-  console.log('\n🚀 Online-File-Editor Backend STARTED (MongoDB, API‑only mode)');
-  console.log(`   http://localhost:${PORT}`);
-  console.log(`   Health check: http://localhost:${PORT}/api/health`);
-  console.log(`   CORS enabled for: ${allowedOrigins.join(', ')}`);
+
+const server = app.listen(PORT, () => {
+  console.log('\n🚀 Online File Editor Backend Started');
+  console.log(`📡 Server running on port: ${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔗 API URL: https://online-file-editor-backend.onrender.com`);
+  console.log(`❤️  Health check: https://online-file-editor-backend.onrender.com/api/health`);
+  console.log(`📁 Upload directory: ${uploadDir}`);
+  console.log(`📁 Processed directory: ${processedDir}`);
+  console.log('\n✅ CORS enabled for:');
+  allowedOrigins.forEach(origin => console.log(`   - ${origin}`));
+  console.log('\n✅ Ready to accept connections\n');
 });
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received. Closing server...');
+  server.close(async () => {
+    await mongoose.connection.close();
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+
+export default app;
