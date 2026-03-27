@@ -20,44 +20,59 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
 
-// ========== MIDDLEWARE ==========
+// ========== CORS CONFIGURATION (FIXED) ==========
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
-  "https://online-file-editor-frontend.onrender.com",
-  "https://online-file-editor-backend.onrender.com",
+  'http://localhost:3000',
+  'https://online-file-editor-frontend.onrender.com',
+  'https://online-file-editor-backend.onrender.com'
 ];
 
 if (process.env.CLIENT_URL) {
   allowedOrigins.push(process.env.CLIENT_URL);
 }
 if (process.env.RENDER_EXTERNAL_URL) {
-  allowedOrigins.push(process.env.RENDER_EXTERNAL_URL);
+  allowedOrigins.push(`https://${process.env.RENDER_EXTERNAL_URL}`);
 }
 
+// CORS middleware with OPTIONS handling
 app.use(cors({
   origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
+    
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
+      console.warn(`CORS blocked request from: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Handle preflight requests explicitly
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.sendStatus(200);
+});
 
 app.use(express.json({ limit: '150mb' }));
 app.use(express.urlencoded({ extended: true, limit: '150mb' }));
 app.use(compression());
 
-// ========== STATIC FOLDERS (not served publicly anymore) ==========
+// ========== STATIC FOLDERS ==========
 const uploadDir = path.join(__dirname, 'uploads');
 const processedDir = path.join(__dirname, 'processed');
 [uploadDir, processedDir].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
-// ❌ REMOVED public static serving – now handled by authenticated routes
 
 // ========== MONGODB CONNECTION ==========
 const mongoUri = process.env.MONGODB_URI;
@@ -82,7 +97,7 @@ const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, minlength: 3 },
   email:    { type: String, required: true, unique: true, lowercase: true },
   password: { type: String, required: true },
-  role:     { type: String, enum: ['user', 'admin'], default: 'user' }, // 👈 ADDED role
+  role:     { type: String, enum: ['user', 'admin'], default: 'user' },
   profile:  { type: Object, default: {} },
   preferences: {
     type: Object,
@@ -112,17 +127,15 @@ const fileSchema = new mongoose.Schema({
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
 }, { timestamps: true });
 
-// 🔹 NEW: Temporary upload model for preview
 const uploadSchema = new mongoose.Schema({
   filename:       { type: String, required: true },
   originalName:   { type: String, required: true },
   size:           { type: Number, required: true },
   mimeType:       { type: String, required: true },
   ownerId:        { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  expiresAt:      { type: Date, default: () => Date.now() + 60 * 60 * 1000 } // 1 hour TTL
+  expiresAt:      { type: Date, default: () => Date.now() + 60 * 60 * 1000 }
 }, { timestamps: true });
 
-// Index for automatic MongoDB TTL deletion (optional but useful)
 uploadSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 const User = mongoose.model('User', userSchema);
@@ -188,7 +201,6 @@ const auth = async (req, res, next) => {
   }
 };
 
-// 👇 NEW: Admin middleware – must be used after auth
 const adminOnly = (req, res, next) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'Admin access required' });
@@ -212,11 +224,35 @@ const updateStats = async (userId, orig, comp) => {
 };
 
 // ========== API ROUTES ==========
+
+// Root route - API info (important: this replaces the marketing page)
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Online File Editor API',
+    version: '1.0.0',
+    status: 'running',
+    endpoints: {
+      health: '/api/health',
+      login: 'POST /api/login',
+      register: 'POST /api/register'
+    }
+  });
+});
+
 app.get('/api/health', (req, res) => {
+  const dbState = mongoose.connection.readyState;
+  const dbStatus = {
+    0: 'disconnected',
+    1: 'connected',
+    2: 'connecting',
+    3: 'disconnecting'
+  }[dbState] || 'unknown';
+  
   res.json({
     success: true,
     message: 'Server running',
-    db: 'OK'
+    db: dbStatus,
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -246,7 +282,7 @@ app.post('/api/register', async (req, res) => {
       username,
       email: email.toLowerCase(),
       password: hashed,
-      role: 'user', // default role
+      role: 'user',
       profile: { fullName, company }
     });
 
@@ -263,7 +299,7 @@ app.post('/api/register', async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        role: user.role, // 👈 include role
+        role: user.role,
         profile: user.profile,
         stats: user.stats,
         preferences: user.preferences
@@ -306,7 +342,7 @@ app.post('/api/login', async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        role: user.role, // 👈 include role
+        role: user.role,
         profile: user.profile,
         stats: user.stats,
         preferences: user.preferences
@@ -336,7 +372,7 @@ app.get('/api/profile', auth, async (req, res) => {
         id: req.user._id,
         username: req.user.username,
         email: req.user.email,
-        role: req.user.role, // 👈 include role
+        role: req.user.role,
         profile: req.user.profile,
         preferences: req.user.preferences,
         stats
@@ -390,7 +426,7 @@ app.put('/api/profile', auth, async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        role: user.role, // 👈 include role
+        role: user.role,
         profile: user.profile,
         preferences: user.preferences,
         stats
@@ -404,12 +440,11 @@ app.put('/api/profile', auth, async (req, res) => {
 
 // ========== AUTHENTICATED FILE SERVING ==========
 
-// Serve temporary upload files (for preview) – only owner can access
 app.get('/api/uploads/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
-    const upload = await Upload.findOne({ filename, ownerId: req.user._id });
-    if (!upload) {
+    const uploadRecord = await Upload.findOne({ filename, ownerId: req.user._id });
+    if (!uploadRecord) {
       return res.status(404).json({ success: false, message: 'File not found or expired' });
     }
 
@@ -418,8 +453,8 @@ app.get('/api/uploads/:filename', auth, async (req, res) => {
       return res.status(404).json({ success: false, message: 'File missing from disk' });
     }
 
-    res.setHeader('Content-Type', upload.mimeType);
-    res.setHeader('Content-Disposition', `inline; filename="${upload.originalName}"`);
+    res.setHeader('Content-Type', uploadRecord.mimeType);
+    res.setHeader('Content-Disposition', `inline; filename="${uploadRecord.originalName}"`);
     res.sendFile(filePath);
   } catch (err) {
     console.error('Error serving upload:', err);
@@ -427,7 +462,6 @@ app.get('/api/uploads/:filename', auth, async (req, res) => {
   }
 });
 
-// Serve processed files (permanent) – only owner can access
 app.get('/api/processed/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
@@ -468,31 +502,27 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       });
     }
 
-    // ---------- PREVIEW BRANCH (UPDATED) ----------
     if (tool === 'preview') {
       const fileInfo = [];
       for (const f of files) {
-        // Store metadata in temporary Upload collection
-        const upload = await Upload.create({
+        const uploadRecord = await Upload.create({
           filename: f.filename,
           originalName: f.originalname,
           size: f.size,
           mimeType: f.mimetype,
           ownerId: req.user._id
-          // expiresAt uses default (1 hour)
         });
 
         fileInfo.push({
-          id: upload._id,
-          name: upload.originalName,
-          size: upload.size,
-          type: upload.mimeType,
-          url: `/api/uploads/${upload.filename}`,   // authenticated URL
-          expiresAt: upload.expiresAt
+          id: uploadRecord._id,
+          name: uploadRecord.originalName,
+          size: uploadRecord.size,
+          type: uploadRecord.mimeType,
+          url: `/api/uploads/${uploadRecord.filename}`,
+          expiresAt: uploadRecord.expiresAt
         });
       }
 
-      // Do NOT delete the files here; they will be cleaned up by TTL/background job
       return res.json({
         success: true,
         files: fileInfo,
@@ -500,7 +530,6 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       });
     }
 
-    // ---------- PROCESSING TOOLS (compress, merge, convert, enhance) ----------
     if (tool === 'merge' && files.length < 2) {
       return res.status(400).json({ success: false, message: 'Merge requires at least 2 files' });
     }
@@ -621,7 +650,6 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       mime = 'image/webp';
     }
 
-    // Save processed file metadata in permanent File collection
     const processed = await File.create({
       filename: path.basename(outPath),
       originalName: fileName,
@@ -637,7 +665,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
 
     res.json({
       success: true,
-      url: `/api/processed/${path.basename(outPath)}`, // authenticated URL
+      url: `/api/processed/${path.basename(outPath)}`,
       fileName,
       size: compSize,
       originalSize: origSize,
@@ -652,7 +680,6 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       message: e.message || 'File processing failed'
     });
   } finally {
-    // Clean up the uploaded files from disk (they are no longer needed)
     if (req.files) {
       req.files.forEach(f => {
         try {
@@ -691,7 +718,7 @@ app.get('/api/history', auth, async (req, res) => {
   }
 });
 
-// ----- DOWNLOAD FILE (forces download) -----
+// ----- DOWNLOAD FILE -----
 app.get('/api/download/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
@@ -722,9 +749,8 @@ app.get('/api/download/:filename', auth, async (req, res) => {
   }
 });
 
-// ========== ADMIN ROUTES (NEW) ==========
+// ========== ADMIN ROUTES ==========
 
-// Get all users (admin only)
 app.get('/api/admin/users', auth, adminOnly, async (req, res) => {
   try {
     const users = await User.find().select('-password').sort({ createdAt: -1 });
@@ -735,25 +761,22 @@ app.get('/api/admin/users', auth, adminOnly, async (req, res) => {
   }
 });
 
-// Get all file processes (admin only) – includes user email via population
 app.get('/api/admin/file-processes', auth, adminOnly, async (req, res) => {
   try {
-    // Fetch all files and populate ownerId to get user email
     const processes = await File.find()
-      .populate('ownerId', 'email username') // get email and username from User
+      .populate('ownerId', 'email username')
       .sort({ createdAt: -1 });
 
-    // Transform to match expected structure for admin frontend
     const formatted = processes.map(proc => ({
       id: proc._id,
       userEmail: proc.ownerId?.email || 'Unknown',
       userName: proc.ownerId?.username || 'Unknown',
       fileName: proc.originalName,
       fileType: proc.type,
-      originalSize: (proc.size / (1024 * 1024)).toFixed(2), // bytes to MB
+      originalSize: (proc.size / (1024 * 1024)).toFixed(2),
       compressedSize: (proc.compressedSize / (1024 * 1024)).toFixed(2),
       processDate: proc.createdAt,
-      status: 'Completed', // all processed files are completed
+      status: 'Completed',
       tool: proc.toolUsed
     }));
 
@@ -764,38 +787,29 @@ app.get('/api/admin/file-processes', auth, adminOnly, async (req, res) => {
   }
 });
 
-// ========== BACKGROUND CLEANUP OF EXPIRED UPLOADS ==========
-// Runs every hour to delete files older than 1 hour from disk
-// (MongoDB TTL will remove the documents automatically)
-const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
+// ========== BACKGROUND CLEANUP ==========
+const CLEANUP_INTERVAL = 60 * 60 * 1000;
 setInterval(async () => {
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    
-    // Find upload documents older than 1 hour (they should already be removed by TTL,
-    // but we also clean up orphaned files just in case)
     const expiredUploads = await Upload.find({ createdAt: { $lt: oneHourAgo } });
     
-    for (const upload of expiredUploads) {
-      const filePath = path.join(uploadDir, upload.filename);
+    for (const uploadRecord of expiredUploads) {
+      const filePath = path.join(uploadDir, uploadRecord.filename);
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
-        console.log(`🧹 Deleted expired upload file: ${upload.filename}`);
+        console.log(`🧹 Deleted expired upload file: ${uploadRecord.filename}`);
       }
-      // Also remove the document (in case TTL didn't fire)
-      await upload.deleteOne();
+      await uploadRecord.deleteOne();
     }
 
-    // Additionally, scan the upload directory for files older than 1 hour
-    // that are not in the Upload collection (orphans)
     const files = await fs.promises.readdir(uploadDir);
     for (const file of files) {
       const filePath = path.join(uploadDir, file);
       const stat = await fs.promises.stat(filePath);
       if (stat.isFile() && (Date.now() - stat.mtimeMs) > 60 * 60 * 1000) {
-        // Check if it's still referenced in Upload
-        const upload = await Upload.findOne({ filename: file });
-        if (!upload) {
+        const uploadRecord = await Upload.findOne({ filename: file });
+        if (!uploadRecord) {
           await fs.promises.unlink(filePath);
           console.log(`🧹 Deleted orphaned upload file: ${file}`);
         }
@@ -806,12 +820,11 @@ setInterval(async () => {
   }
 }, CLEANUP_INTERVAL);
 
-// ========== NO CATCH‑ALL ROUTE (API ONLY) ==========
-
 // ========== START SERVER ==========
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
-  console.log('\n🚀Online-File-Editor Backend STARTED (MongoDB, API‑only mode)');
+  console.log('\n🚀 Online-File-Editor Backend STARTED (MongoDB, API‑only mode)');
   console.log(`   http://localhost:${PORT}`);
   console.log(`   Health check: http://localhost:${PORT}/api/health`);
-}); 
+  console.log(`   CORS enabled for: ${allowedOrigins.join(', ')}`);
+});
