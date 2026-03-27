@@ -59,8 +59,8 @@ const Home = () => {
     <div className="home">
       <section className="hero">
         <div className="hero-content">
-          <h1>Welcome to Rio-Industry</h1>
-          <p className="hero-subtitle">The Ultimate File Management Solution You'll Absolutely Love! 💖</p>
+          <h1>Welcome to Online-File-Editor</h1>
+          <p className="hero-subtitle">The Ultimate Online-File-Editor Solution You'll Absolutely Love! 💖</p>
           <p className="hero-description">
             Transform your digital workflow with our powerful, intuitive, and feature-rich file management platform. 
             Experience the future of file compression and organization today.
@@ -68,15 +68,15 @@ const Home = () => {
           <div className="hero-stats">
             <div className="stat">
               <i className="fas fa-users"></i>
-              <span>50K+ Happy Users</span>
+              <span>50 Happy Users</span>
             </div>
             <div className="stat">
               <i className="fas fa-file-archive"></i>
-              <span>2M+ Files Compressed</span>
+              <span>2 Files Compressed</span>
             </div>
             <div className="stat">
               <i className="fas fa-cloud"></i>
-              <span>500TB+ Space Saved</span>
+              <span>500 Space Saved</span>
             </div>
           </div>
         </div>
@@ -86,7 +86,7 @@ const Home = () => {
       </section>
 
       <section className="features-grid">
-        <h2>Why You'll Love FileMaster Pro</h2>
+        <h2>Why You'll Online-File-Editor</h2>
         <div className="features-container">
           {features.map((feature, index) => (
             <div key={index} className="feature-card">
@@ -102,7 +102,7 @@ const Home = () => {
 
       <section className="cta-section">
         <div className="cta-content">
-          <h2>Ready to Transform Your File Management?</h2>
+          <h2>Ready to Transform Your Online-File-Editor?</h2>
           <p>Join thousands of satisfied users who have revolutionized their digital workflow</p>
           <button className="cta-button">
             <i className="fas fa-rocket"></i>
