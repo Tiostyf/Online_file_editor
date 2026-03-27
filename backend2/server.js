@@ -22,8 +22,8 @@ const app = express();
 
 // ========== MIDDLEWARE ==========
 const allowedOrigins = [
-  'http://localhost:5173',
-  'http://localhost:5174',
+  'https://online-file-editor-frontend.onrender.com/',
+
 ];
 
 if (process.env.CLIENT_URL) {
