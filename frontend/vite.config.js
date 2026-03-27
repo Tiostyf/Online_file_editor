@@ -7,7 +7,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:5001', // your backend
+        target: 'https://online-file-editor-backend.onrender.com', // your backend
         changeOrigin: true,
         secure: false,
       },
